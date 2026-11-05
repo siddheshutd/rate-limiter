@@ -1,0 +1,39 @@
+# Stage 3: the same gateway against a six-node cluster instead of one node.
+#   ./scripts/redis-cluster.sh start && ./scripts/redis-cluster.sh create
+#   java -jar gateway-service/target/*.jar --spring.profiles.active=cluster
+#
+# Nothing in the limiter changes. The bucket store issues one single-key command per rule, and a
+# single key always maps to exactly one slot, so both LuaBucketStore and the stage-1 store are already
+# cluster-safe — which is the payoff for putting the hash tag in the key layout back at stage 0.
+spring:
+  data:
+    redis:
+      # Boot picks cluster mode as soon as cluster.nodes is non-empty and ignores the standalone
+      # host/port in application.yaml; there is no "mode" switch to keep in sync.
+      cluster:
+        nodes:
+          - 127.0.0.1:7100
+          - 127.0.0.1:7101
+          - 127.0.0.1:7102
+          - 127.0.0.1:7103
+          - 127.0.0.1:7104
+          - 127.0.0.1:7105
+        # How many redirects one command may follow before it gives up. 2 is the usual choice: one MOVED
+        # (the slot lives elsewhere) and one ASK (the slot is mid-migration, so ask that node anyway).
+        # A redirect is not a retry of the bucket spend — with the Lua store the whole refill-check-spend
+        # happens on the owning node, so a redirect costs a round trip and never a wrong token count.
+        max-redirects: 2
+      lettuce:
+        cluster:
+          refresh:
+            # Lettuce caches the slot map; a topology change (failover, reshard) is only learned on this
+            # interval, or immediately when a command comes back MOVED to a node the cache does not know.
+            # Without it the gateway keeps asking a demoted master for slots it no longer serves.
+            period: 30s
+            # Pull new partition info from the nodes we are already connected to, so a node added during
+            # a reshard shows up without waiting for the periodic refresh.
+            dynamic-refresh-sources: true
+            # Boot 4.1.2 has no `adaptive` key here — verified against DataRedisProperties in the
+            # jar, which exposes only period and dynamic-refresh-sources. Boot 3 tutorials that set
+            # `refresh.adaptive: true` are silently ignored on this stack. For Lettuce's adaptive
+            # triggers (refresh on every MOVED) the hook is a LettuceClientOptionsBuilderCustomizer bean.

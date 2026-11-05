@@ -1,0 +1,120 @@
+# Stage 1: one gateway, one standalone Redis, buckets spent with read-modify-write.
+# The rules are tuned to produce visible behaviour in seconds, not to model 1 M req/s.
+spring:
+  application:
+    name: rate-limiter-gateway
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      # The limiter sits in the request path, so its own timeout has to be smaller than the latency it
+      # is protecting. Production would use 1-2 ms; 50 ms here is what makes a laptop's cold key, a
+      # fork, or a debugger breakpoint survivable without the breaker tripping on every run.
+      timeout: 50ms
+      connect-timeout: 1s
+
+server:
+  port: 8080
+  tomcat:
+    threads:
+      max: 200
+
+ratelimiter:
+  # Which bucket store answers: lua (stage 2, one EVALSHA per rule) or rmw (stage 1, three commands and
+  # a race). Same filter, rules and latency recorder either way, so demo.sh measures the store rather
+  # than the code around it. Override with --ratelimiter.store=rmw to reproduce the stage-1 numbers.
+  store: lua
+
+  # Which process this is. Change to gw-2 for the second gateway; the buckets are shared regardless,
+  # which is the whole point of the two-instance demo.
+  instance: gw-1
+
+  # X-Forwarded-For is client-supplied. Trusting it would let a script mint unlimited buckets by
+  # varying one header. Turn on only when the LB in front of us is the writer.
+  trust-proxy: false
+
+  retry-after-jitter-percent: 15
+
+  bucket:
+    # TTL = time to refill from empty to full + this. Shorter and a paused principal's debt is
+    # forgiven (a free burst); longer and cold keys sit in memory for nothing.
+    grace-seconds: 60
+
+  breaker:
+    consecutive-failures: 3
+    open-millis: 5000
+
+  auth:
+    # credential -> "principal:TIER". Stands in for the authn service; the limiter's input is a
+    # verified principal, which is why no rule here reads a user id off the request.
+    tokens:
+      tok_free_alice: "alice:FREE"
+      tok_paid_bob: "bob:PAID"
+
+  # Declaration order is evaluation order, and a request is charged by EVERY rule that binds it. So
+  # alice reading /api/v1/feed spends two round trips: her own bucket and her source IP's bucket.
+  # That stacking is the honest cost of layered limits, and /debug/rl shows it in the latency.
+  rules:
+    - id: feed_free
+      scope: USER
+      tier: FREE
+      path-prefix: /api/v1/feed
+      capacity: 10          # burst of 10, then 1 per second sustained
+      refill-per-second: 1
+      cost: 1
+      fail-mode: OPEN       # a read: an outage of the limiter is not a reason to 500 the product
+
+    - id: feed_paid
+      scope: USER
+      tier: PAID
+      path-prefix: /api/v1/feed
+      capacity: 100
+      refill-per-second: 20
+      cost: 1
+      fail-mode: OPEN
+
+    # Cost weighting: a search is ~5x a feed read, so it spends 5 tokens. One fewer rule per tier
+    # than modelling it as five separate reads, and the reason tiers are a rule field not a code path.
+    - id: search_free
+      scope: USER
+      tier: FREE
+      path-prefix: /api/v1/search
+      capacity: 10
+      refill-per-second: 1
+      cost: 5
+      fail-mode: OPEN
+
+    # Anonymous traffic, and the NAT problem in one line: everyone behind one corporate address
+    # shares this bucket, so the heaviest user on that IP 429s the rest. Kept as a backstop, with
+    # USER rules doing the real work whenever a credential exists.
+    - id: anon_ip
+      scope: IP
+      path-prefix: /api/v1/
+      capacity: 20
+      refill-per-second: 2
+      cost: 1
+      fail-mode: OPEN
+
+    # Abuse route: fail-closed. If the store cannot answer, login is denied rather than allowed
+    # through unchecked — the failure being bypassed here is credential stuffing, not a 429.
+    - id: login_guard
+      scope: IP
+      path-prefix: /auth/
+      capacity: 5
+      refill-per-second: 0.5
+      cost: 1
+      fail-mode: CLOSED
+
+    # The global ceiling. Every request in the fleet contends on this one key on one shard, which is
+    # what "10 K/s across all users" costs: per-user buckets shard naturally, a global count does not.
+    - id: report_global
+      scope: GLOBAL
+      path-prefix: /api/v1/report
+      capacity: 50
+      refill-per-second: 5
+      cost: 1
+      fail-mode: OPEN
+
+logging:
+  level:
+    com.hld.ratelimiter: INFO
