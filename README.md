@@ -1,17 +1,95 @@
 # Rate limiter — prototype (stages 0 to 3)
 
-A token-bucket rate limiter running inside a gateway that receives HTTP requests the way a real edge
-would, spending buckets in a **real Redis** over a **real network hop** — and since stage 3, in a
-**real six-node Redis Cluster** with slot routing, redirects and a failover. Nothing here is mocked
-except the origin behind the gateway (a mock controller) and the auth service (a token table in
-`application.yaml`).
+> **Read [ASSUMPTIONS.md](ASSUMPTIONS.md) first** — the requirements, the assumptions, and what was chosen over what.
 
-Stage 1 is **deliberately wrong in one specific way**: a bucket is spent with three separate commands —
-read, write, expire — so concurrent requests decide from a stale snapshot. That is the gap an estimate
-like "2 M ops/s (get + update per request)" hides — arithmetic about a race, presented as a cost —
-turned into something you can watch in `MONITOR` and count. Stage 2 replaces those three commands with
-one Lua script, and stage 3 moves the same jar onto a sharded cluster without changing a line of the
-limiter. Both are built, and the stage-1 numbers below are what they beat:
+## What this is
+
+A rate limiter you can run. Every request into the gateway is checked **before** it reaches the code
+behind it, and the check itself is what this prototype is about: how cheap it can be, how exact it can
+be, and what happens when the thing holding the state (Redis) is slow, contended, sharded, or on the
+other side of a failover.
+
+The answer a caller gets is designed rather than incidental: a `429`, a `Retry-After` saying when to
+come back, and `RateLimit-Limit / -Remaining / -Reset / -Policy` so a well-behaved client can pace
+itself instead of guessing.
+
+| | real here | faked here |
+|---|---|---|
+| the store | one Redis (stages 0-2), then a six-node Redis Cluster (stage 3) — real network hops, real `MOVED`, real failover | |
+| the edge | two separate gateway JVMs, so "both instances share one bucket" is something you count, not something you claim | |
+| the origin API | | `MockApiController`: `/api/v1/feed` and friends return a canned body |
+| the auth service | | a token table in `application.yaml` (`tok_free_alice` → `alice:FREE`) |
+
+---
+
+## The algorithm: a token bucket
+
+Picture a small wallet of tokens that every caller carries.
+
+- The wallet holds at most **`capacity`** tokens and refills at a steady **`refill-per-second`**.
+- Each request pays a **`cost`** in tokens. Enough tokens → the request goes through and the wallet is
+  lighter. Not enough → `429`, and `Retry-After` says how long until there are tokens again.
+- Because tokens only pile up as far as `capacity`, one caller can **burst** and is then held to a
+  **sustained rate**. `feed_free` is capacity 10 at refill 1/s: fire 10 requests in the same second and
+  all 10 pass, the 11th waits about a second, and from then on it is one per second. Burst and rate are
+  two separate dials — which is precisely what a plain "N per window" counter cannot express.
+- **`cost`** turns "this endpoint is five times the work" into a number instead of extra code.
+  `search_free` has capacity 10 and costs 5, so a burst is 2 searches. Without it you would model the
+  same pricing as five rules, five keys and five round trips.
+
+What the store keeps per caller is **two fields**: `tokens`, and `last_refill_ms` — the moment that
+balance was last computed. Refilling is not a background job; it is arithmetic done when a request
+arrives (`tokens + elapsed × refill-per-ms`, clamped at `capacity`). So memory does not grow with
+traffic: one request or a hundred million, the bucket is still two fields. A third number, the TTL, lets
+an idle caller's key disappear and come back at full capacity — and the size of that key is measured,
+not estimated: **~142 bytes** per bucket on a live node ([stage-0 drill 7](#stage-0-drills--meet-the-node)),
+which is about 3× what a "50 bytes per counter" back-of-envelope figure predicts.
+
+### Why a token bucket, and not the other obvious answers
+
+| option | how it behaves | why this prototype does not use it |
+|---|---|---|
+| fixed window counter | "up to N per calendar second" | the boundary trick: N in the last half-second plus N in the next first half-second admits **2N** |
+| sliding window counter | weighted estimate over the trailing window | smoother, but still one counter per window and no way to price an expensive endpoint |
+| sliding window log | a timestamp per request, count those inside the window | exact, and its memory grows with traffic — at 100 M principals that is the design, not a detail |
+| leaky bucket | requests drip out at a constant rate | no burst at all, so headroom a caller earned goes unused |
+| **token bucket** | burst to `capacity`, then the sustained `refill` rate | chosen: O(1) state, burst as a property rather than an accident, and `cost` for pricing |
+
+---
+
+## How one request gets decided
+
+```
+client → RateLimitFilter → IdentityResolver → RuleEngine → BucketStore (Redis) → origin (mock controller)
+                                  ↑ who          ↑ which      ↑ may I spend?
+```
+
+1. **`RateLimitFilter`** intercepts the request. Nothing reaches the API until this says so.
+2. **`IdentityResolver`** turns the `Authorization: Bearer …` credential into the principal that gets
+   counted. A caller cannot choose who is charged: an `X-User-Id` header disagreeing with the
+   credential is ignored *and counted*, visible as `spoofAttempts` in `/debug/rl`.
+3. **`RuleEngine`** picks the rules that bind, by path prefix and tier. **Every** binding rule is
+   charged, so one request from alice to `/api/v1/feed` spends two buckets — `feed_free` and the
+   `anon_ip` backstop — and the tightest of them is the limit she is told about.
+4. **`BucketStore`** asks the store for permission. Stage 1 does it with three separate commands (read,
+   write, expire) and loses the race; stage 2 does it in one Lua script that refills, checks, spends
+   and sets the TTL as a single operation Redis will not interleave.
+5. **The answer.** Allow → the request reaches the origin and the response carries `RateLimit-*`.
+   Deny → `429` with `Retry-After`, and no origin call at all.
+6. **And when Redis cannot answer?** Each rule declares its own `fail-mode`: `OPEN` for reads (a
+   limiter outage is not a reason to break the product) and `CLOSED` for `/auth/` (where what is being
+   bypassed is credential stuffing). Both paths are counted — `fallbackAdmitted`, `fallbackDenied` —
+   because fail-open that nobody measures is just a bypass with better spelling.
+
+---
+
+## Built in stages, one Redis idea at a time
+
+The same jar runs every stage; what changes is what Redis is doing, and therefore what you can measure.
+Stage 1 is **deliberately wrong in one specific way** — a bucket spent with three commands, so
+concurrent requests decide from a stale snapshot — because that is the failure a figure like
+"2 M ops/s (get + update per request)" hides: arithmetic about a race, presented as a cost. Those
+stage-1 numbers are the baseline stages 2 and 3 have to beat:
 
 | | stage 1 (read-modify-write) | stage 2 (Lua) | stage 3 (that, on a cluster) |
 |---|---|---|---|
@@ -19,10 +97,59 @@ limiter. Both are built, and the stage-1 numbers below are what they beat:
 | 30 concurrent requests against a 10-token bucket | **30 admitted**, bucket ends at 9.0 | **10 admitted, 20 × 429** | same as stage 2 (measured on the cluster) |
 | one shard's master dies | n/a | n/a | failover in ~8 s, absorbed as latency; the bucket survives it |
 
-```
-client → RateLimitFilter → IdentityResolver → RuleEngine → BucketStore (Redis) → origin (mock controller)
-                                  ↑ who          ↑ which      ↑ may I spend?
-```
+| stage | what is new | the number you take away |
+|---|---|---|
+| 0 | one Redis node, started from this repo's own config file | `maxmemory-policy`, AOF, `DBSIZE`, `MEMORY USAGE` |
+| 1 | buckets spent with read-modify-write, from two JVMs | `roundTripsPerRule=3`, and 30 admitted for 10 tokens |
+| 2 | one Lua script; the spend is atomic | `roundTripsPerRule=1`, 10 admitted and 20 × `429`, p50/p99 |
+| 3 | six nodes, 16 384 slots, identical jar | `MOVED`/`CROSSSLOT`, per-master `dbsize`, promotion in ~8 s |
+| 4 | *planned:* local bucket state plus a sync interval | how much over-admission that interval buys back |
+
+---
+
+## What the tests do, and what they measure
+
+**There are no unit tests, deliberately.** A mocked Redis cannot lose a race, cannot answer `MOVED`, and
+cannot be killed between its read and its write — every claim in this file is about behaviour that only
+exists when the store is a real process across a real socket. Checking happens in two forms instead:
+
+- **`./scripts/demo.sh`** — one command, and every section prints a measurement plus the conclusion that
+  measurement earns. Eight sections run against a standalone node; `--outage` adds the fail-open /
+  fail-closed section, `RL_TOPOLOGY=cluster` adds slot routing, and `FAILOVER=1` adds the promotion
+  drill — eleven in all. Section by section: [What `demo.sh` checks](#what-demosh-checks-section-by-section).
+- **The stage drills** — `redis-cli` commands you type yourself, one per idea, so the mechanism is
+  something you saw in `MONITOR` rather than read about. Each stage section lists them with the real
+  output from a run.
+
+The numbers both forms read come from two places:
+
+| where | what it tells you |
+|---|---|
+| `GET /debug/rl` | `store`, `roundTripsPerRule`, `storeLatency` (p50 / p99 / max), `breaker` state and trips, `spoofAttempts`, and per-rule `admitted` / `denied` / `fallbackAdmitted` / `fallbackDenied` / `unmetered` |
+| `GET /debug/rl/bucket?scope=user&subject=alice&rule=feed_free` | one bucket's own `tokens`, `lastRefillMillis` and `ttlMillis`, exactly as Redis holds them |
+| `GET /debug/rl/rules` | the rules as bound at startup — the place to look when a limit is not what you expect |
+| Redis itself | `DBSIZE`, `INFO keyspace`, `MEMORY USAGE`, `SLOWLOG GET`, `INFO commandstats`, `MONITOR`, `CLUSTER KEYSLOT`, `CLUSTER INFO`/`NODES` |
+
+One caution that applies to every number below: they were measured on a single laptop with the store on
+localhost, where one round trip is about 1 ms. The *ratios* and the failure behaviours are the portable
+findings; the absolute latencies are this machine's, and a limiter placed across a real network or under
+real load will look different.
+
+---
+
+## How this file is organised
+
+Before any of it: [ASSUMPTIONS.md](ASSUMPTIONS.md) — the requirements, the assumptions nothing here
+proves, and what was chosen over what.
+
+1. [Prerequisites](#prerequisites) and [Run it](#run-it) — the commands to a working demo.
+2. [What the rules are](#what-the-rules-are) — the six limits and the two traps hidden in them.
+3. [Stage 0 drills](#stage-0-drills--meet-the-node) — configure and question one Redis node.
+4. [Stage 1 drills](#stage-1-drills--the-race-in-two-terminals) — the read-modify-write race, live.
+5. [Stage 2 drills](#stage-2-drills--one-script-one-round-trip) — the Lua fix, and what it costs.
+6. [Stage 3 drills](#stage-3-drills--the-same-jar-on-six-nodes) — slots, redirects, failover.
+7. [What `demo.sh` checks](#what-demosh-checks-section-by-section), [Layout](#layout),
+   [Next stage](#next-stage-not-built-yet), [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -50,7 +177,7 @@ Standalone (stages 0-2) — one Redis on :6379:
 ./scripts/two-gateways.sh start              # gw on :8080 and :8081, store from application.yaml
 curl -s -D - -o /dev/null -H "Authorization: Bearer tok_free_alice" \
      http://127.0.0.1:8080/api/v1/feed       # first answer, with RateLimit-* headers
-./scripts/demo.sh                            # all eleven behaviours, measured
+./scripts/demo.sh                            # eight sections, each a measurement plus its conclusion
 ./scripts/demo.sh --outage                   # + fail-open vs fail-closed with Redis stopped
 ```
 
@@ -675,7 +802,7 @@ Per-master `dbsize` after a demo run is uneven, and it will stay uneven: the sha
 load. That is also the working-set estimate from stage 0 divided by the number of masters — ~14 GB for
 100 M buckets is ~5 GB per master at three shards, which fits.
 
-## The rest of what `demo.sh` shows
+## What `demo.sh` checks, section by section
 
 | Section | Measured here | The line it earns |
 |---|---|---|
