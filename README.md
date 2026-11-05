@@ -5,6 +5,7 @@ A working rate limiter you can run, break, and measure. Every request to the gat
 > **Before you dive in:** read [ASSUMPTIONS.md](ASSUMPTIONS.md) for the requirements and design choices behind this prototype.
 
 ---
+## **IMP:** this is a quick prototype, built in about 2-3 hours with a Qwen 3.8-Flash agent. Its main purpose is to help someone practice a rate-limiter system design question: it makes the concepts concrete and measurable so you can see them behave, and understand the flow better. It does **not** assume, and is not meant to be, used as-is in any real application or in production.
 
 ## Contents
 
