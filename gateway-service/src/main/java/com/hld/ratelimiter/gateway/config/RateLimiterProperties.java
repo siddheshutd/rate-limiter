@@ -7,7 +7,7 @@ import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Every knob the design log argues about, in one place, under {@code ratelimiter.*}.
+ * Every knob this prototype tunes, in one place, under {@code ratelimiter.*}.
  *
  * <p>Redis connection settings are not here on purpose: those are {@code spring.data.redis.*} and
  * belong to the client, including the command timeout. A limiter in the request path must have a

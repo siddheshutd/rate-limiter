@@ -10,8 +10,8 @@ import java.util.concurrent.atomic.LongAdder;
  *
  * <p>The fallback counter is the one an operator has to watch. Fail-open is correct until it is a
  * bypass: if Redis is unreachable for a minute at 1 M req/s, "we allowed everything" is an outage of the
- * abuse protection, and the only way to know that is that someone counted it. The review's alert list
- * starts here.
+ * abuse protection, and the only way to know that is that someone counted it. Alerting on the limiter
+ * starts with this counter.
  *
  * <p>In production these are per-node counters pushed to one metrics backend and aggregated by rule and
  * shard; a request-path limiter must not synchronise on a shared total, so the numbers here are additive

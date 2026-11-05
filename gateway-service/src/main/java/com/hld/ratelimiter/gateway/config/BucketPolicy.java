@@ -3,7 +3,7 @@ package com.hld.ratelimiter.gateway.config;
 /**
  * The three numbers a token bucket actually needs, resolved once at startup from a {@link Rule}.
  *
- * <p>Keeping TTL in here rather than per-key is the memory argument from the review: a bucket for an
+ * <p>Keeping TTL in here rather than per-key is a memory argument, not a style one: a bucket for an
  * idle principal has no value left, so it can be dropped and recreated at full capacity. Without a
  * TTL the store grows one key per principal forever.
  */

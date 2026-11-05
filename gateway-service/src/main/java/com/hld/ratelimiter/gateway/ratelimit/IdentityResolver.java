@@ -9,9 +9,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Turns a request into the principal the limiter will count, from the credential only.
  *
- * <p>This is the class the a1 review's biggest placement error lives in. The drawn API was
- * {@code POST /tryAcquire/{userId}}, which lets a caller pick the identity it is charged under — or
- * omit the call entirely. Here the identity is derived from a credential the gateway verifies, and an
+ * <p>A limiter that takes the subject from the caller's own URL — {@code POST /tryAcquire/{userId}} —
+ * lets that caller pick the identity it is charged under, or omit the call entirely. This class is
+ * where that gets closed off: the identity is derived from a credential the gateway verifies, and an
  * {@code X-User-Id} assertion that disagrees with it is ignored and counted, never honoured.
  */
 public final class IdentityResolver {

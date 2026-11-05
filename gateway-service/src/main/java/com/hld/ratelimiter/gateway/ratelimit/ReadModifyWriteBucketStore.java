@@ -8,9 +8,9 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 /**
  * Stage 1: the bucket held in Redis, spent with a read, a write, and an expire.
  *
- * <p>This class is deliberately incorrect, in the specific way the a1 review calls out. The estimate
- * said {@code 2 M ops/s (get + update per request)}; that number is not a capacity plan, it is a race
- * condition written down as arithmetic:
+ * <p>This class is deliberately incorrect in one specific way. Sizing it as
+ * {@code 2 M ops/s (get + update per request)} is not a capacity plan; it is a race condition written
+ * down as arithmetic:
  *
  * <pre>
  * gateway A: HGETALL rl:{user:alice:api_read}  -> tokens 1

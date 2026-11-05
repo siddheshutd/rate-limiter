@@ -1,8 +1,8 @@
 package com.hld.ratelimiter.gateway.ratelimit;
 
 /**
- * The gateway's answer for one request: the internal contract the review says should be a decision
- * rather than an endpoint.
+ * The gateway's answer for one request: a decision object rather than a boolean, so the rule that
+ * bound, the headers, the retry hint and the fallback flag all travel together.
  *
  * <p>{@code degraded} is the flag that keeps fail-open honest. A degraded allow is invisible to the
  * caller by design — telling the client "we could not check you" invites it to slow down, and the

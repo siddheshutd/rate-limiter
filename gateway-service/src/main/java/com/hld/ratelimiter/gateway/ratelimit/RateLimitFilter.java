@@ -19,8 +19,8 @@ import tools.jackson.databind.ObjectMapper;
  * The gate: a normal HTTP request arrives, identity is derived from its credential, the bucket is
  * spent, and only then does the request reach the API.
  *
- * <p>Inline at the edge is the placement the review's first curveball asks for and the a1 drawing got
- * wrong. As a separate service it is an extra hop per request on top of the store hop, a second fleet
+ * <p>Inline at the edge is the placement the design depends on. As a separate service it is an extra
+ * hop per request on top of the store hop, a second fleet
  * to keep alive, and an endpoint a client can decline to call.
  *
  * <p>The control plane is deliberately not behind this filter. A bad rule that limits everyone is

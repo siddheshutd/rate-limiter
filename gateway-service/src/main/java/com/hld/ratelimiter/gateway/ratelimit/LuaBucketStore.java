@@ -12,11 +12,11 @@ import org.springframework.data.redis.core.script.RedisScript;
 /**
  * Stage 2: the same bucket, spent by one script call.
  *
- * <p>Everything the design log argued for is in the script rather than here — refill, check, decrement
- * and TTL in one operation Redis will not interleave, with the clock read from the server so the two
- * gateways cannot disagree about elapsed time. This class exists to keep the port honest: the filter,
- * the rules, the identity and the headers above it do not change between stage 1 and stage 2, which is
- * the whole argument for putting the decision behind {@link BucketStore}.
+ * <p>Everything that makes the decision atomic is in the script rather than here — refill, check,
+ * decrement and TTL in one operation Redis will not interleave, with the clock read from the server so
+ * the two gateways cannot disagree about elapsed time. This class exists to keep the port honest: the
+ * filter, the rules, the identity and the headers above it do not change between stage 1 and stage 2,
+ * which is the whole argument for putting the decision behind {@link BucketStore}.
  *
  * <p>The client-side half of atomicity is the script cache. Spring's script executor sends
  * {@code SCRIPT LOAD} once, then calls {@code EVALSHA <sha> 1 <key> …} for every request — one round

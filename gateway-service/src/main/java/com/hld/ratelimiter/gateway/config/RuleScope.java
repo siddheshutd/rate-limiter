@@ -23,7 +23,7 @@ public enum RuleScope {
      * One shared bucket for a whole rule, no principal in the key. This is the only scope that can
      * express "10 K/s across all users" — and it is a hot key by construction: every request in the
      * fleet contends on one Redis key on one shard. The prototype routes it to a dedicated key so
-     * the contention is visible in {@code /debug/rl} rather than argued about in a design doc.
+     * the contention is visible in {@code /debug/rl} rather than argued about in prose.
      */
     GLOBAL
 }

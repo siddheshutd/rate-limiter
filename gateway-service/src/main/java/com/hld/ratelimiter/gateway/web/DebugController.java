@@ -22,7 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>A rate limiter is a control system: without the allow/deny ratio per rule, the store's p99, the
  * breaker state and the fallback count, there is no way to tell whether it is protecting the service or
- * quietly letting everyone through. Every number the a1 review says was missing is here, measured rather
+ * quietly letting everyone through. Every number an operator would ask for is here, measured rather
  * than asserted. The other half of that inventory — how many buckets the working set actually holds — is
  * read from Redis itself ({@code redis-cli DBSIZE}, {@code INFO keyspace}) rather than copied into an
  * HTTP endpoint, because that is the operation an operator needs to know, not a number to hide.

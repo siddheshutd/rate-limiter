@@ -5,8 +5,8 @@ package com.hld.ratelimiter.gateway.config;
  *
  * <p>Capacity and refill are separate dials, and that separation is the whole reason this is a token
  * bucket and not a fixed window: capacity 20 / refill 1/s answers "a burst of 20 then 1 per second",
- * which is the review's "1000 in 1 s but 100/s sustained" curveball in its small form. A window counter
- * can only say "N per window" and then lets 2N through across the boundary.
+ * which is the burst-versus-sustained distinction a window counter cannot express — it can only say
+ * "N per window" and then lets 2N through across the boundary.
  *
  * <p>{@code cost} is what makes tiers and expensive endpoints the same problem: a search that is ten
  * times the work of a read subtracts ten tokens instead of one. Without it the only lever left is a

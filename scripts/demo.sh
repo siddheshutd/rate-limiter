@@ -110,7 +110,7 @@ echo
 printf 'the rejection, verbatim:\n'
 curl -s -D - -o /dev/null --max-time 5 -H "Authorization: Bearer $ALICE" "$GW1/api/v1/feed" \
   | grep -iE '^HTTP/|^RateLimit|^Retry-After' | sed 's/^/  /'
-echo "  429 with Retry-After, not 201 and not a bare 429 - the a1 review's API section, fixed."
+echo "  429 with Retry-After, not 201 and not a bare 429 - a rejection the client can act on."
 
 # --------------------------------------------------------------------------- 2. shared state
 section "2. two gateways, sequential: one bucket, not two"
@@ -143,8 +143,9 @@ if [ "$STORE" = lua ]; then
   echo "compete for 10 tokens and 20 are refused. Re-run with --ratelimiter.store=rmw to see the 30."
 else
   echo "Every reader saw ~10 tokens before any writer landed, so all 30 were admitted for ~10 tokens of"
-  echo "state. That gap is what the a1 review called '2 M ops/s is a race, not a cost estimate'. Stage 2's"
-  echo "Lua script closes it: refill, check, decrement and TTL in one operation Redis will not interleave."
+  echo "state. Sizing that as '2 M ops/s (get + update per request)' is arithmetic about a race, not a"
+  echo "capacity plan. Stage 2's Lua script closes it: refill, check, decrement and TTL in one operation"
+  echo "Redis will not interleave."
 fi
 rm -rf "$out"
 
@@ -183,8 +184,8 @@ printf 'the one shared key  : rl:{global:all:report_global} tokens=%s\n' \
 printf 'alice+bob see limit : '; curl -s -o /dev/null -D - --max-time 5 "$GW1/api/v1/report" | grep -i '^RateLimit-Limit' | tr -d '\r'
 echo "report_global has capacity 50 and is ONE key for the entire fleet - the hot key by construction:"
 echo "per-user buckets shard naturally by key, a global count does not. The header reports 20 because"
-echo "the anon_ip backstop is tighter for this caller, which is the review's third hard part showing up"
-echo "as a number rather than a paragraph."
+echo "the anon_ip backstop is tighter for this caller - the awkward part of stacked limits, shown as a"
+echo "number instead of described in prose."
 
 section "7. identity cannot be asserted"
 flush

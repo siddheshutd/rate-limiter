@@ -8,9 +8,9 @@ import java.util.concurrent.atomic.LongAdder;
  * Store round-trip latency, in a fixed histogram, because the <10 ms promise needs a number attached.
  *
  * <p>Stage 1 spends every request on one read plus two writes; the p50/p99 here is the baseline stage 2
- * has to beat with a single script call. Measuring it is not decoration: the review's point is that a
- * limiter in the request path is only affordable if its own cost is known and bounded, and the answer to
- * "why is p99 rising" is either the store, the timeout, or the number of rules per request.
+ * has to beat with a single script call. Measuring it is not decoration: a limiter in the request path
+ * is only affordable if its own cost is known and bounded, and the answer to "why is p99 rising" is
+ * either the store, the timeout, or the number of rules per request.
  *
  * <p>Bucketed counts rather than a stored sample list: keeping every observation to compute an exact
  * percentile is the same mistake as a sliding log — memory growing with request count.

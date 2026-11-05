@@ -1,17 +1,17 @@
 # Rate limiter — prototype (stages 0 to 3)
 
-The limiter from `design-logs/rate-limiter-a1.md`, running inside a gateway that receives HTTP requests
-the way a real edge does, spending token buckets in a **real Redis** over a **real network hop** — and
-since stage 3, in a **real six-node Redis Cluster** with slot routing, redirects and a failover.
-Nothing here is mocked except the origin behind the gateway (a mock controller) and the auth service
-(a token table in `application.yaml`).
+A token-bucket rate limiter running inside a gateway that receives HTTP requests the way a real edge
+would, spending buckets in a **real Redis** over a **real network hop** — and since stage 3, in a
+**real six-node Redis Cluster** with slot routing, redirects and a failover. Nothing here is mocked
+except the origin behind the gateway (a mock controller) and the auth service (a token table in
+`application.yaml`).
 
 Stage 1 is **deliberately wrong in one specific way**: a bucket is spent with three separate commands —
-read, write, expire — so concurrent requests decide from a stale snapshot. That is the a1 review's
-"2 M ops/s (get + update per request) is a race, not a cost estimate", turned into something you can
-watch in `MONITOR` and count. Stage 2 replaces those three commands with one Lua script, and stage 3
-moves the same jar onto a sharded cluster without changing a line of the limiter. Both are built, and
-the stage-1 numbers below are what they beat:
+read, write, expire — so concurrent requests decide from a stale snapshot. That is the gap an estimate
+like "2 M ops/s (get + update per request)" hides — arithmetic about a race, presented as a cost —
+turned into something you can watch in `MONITOR` and count. Stage 2 replaces those three commands with
+one Lua script, and stage 3 moves the same jar onto a sharded cluster without changing a line of the
+limiter. Both are built, and the stage-1 numbers below are what they beat:
 
 | | stage 1 (read-modify-write) | stage 2 (Lua) | stage 3 (that, on a cluster) |
 |---|---|---|---|
@@ -45,7 +45,6 @@ edit and restart.
 Standalone (stages 0-2) — one Redis on :6379:
 
 ```bash
-cd "L0-atoms/rate-limiter"
 ./scripts/redis-standalone.sh start          # stage 0: the node, on :6379
 ./scripts/two-gateways.sh build              # mvn package (skipTests)
 ./scripts/two-gateways.sh start              # gw on :8080 and :8081, store from application.yaml
@@ -187,7 +186,7 @@ win and the atomicity win. Note too that Lettuce sends `HMSET` for the map write
 Redis 4 but still served).
 
 
-**4. Read a bucket the way the design log should have written it.** After one alice request:
+**4. Read a bucket the way the store actually writes it.** After one alice request:
 
 ```
 HGETALL rl:{user:alice:feed_free}
@@ -212,8 +211,8 @@ MEMORY USAGE      98
 Two things to read off that:
 
 - **The state is O(1).** Two fields, regardless of how many requests the principal made. A sliding-window
-  log keeps one entry per request; a token bucket keeps a number and a timestamp. That is the argument
-  the design log made and this key proves.
+  log keeps one entry per request; a token bucket keeps a number and a timestamp, and this key is that
+  claim measured rather than asserted.
 - **`PTTL` ≈ 70 000 ms is the TTL formula, computed.** `feed_free` is capacity 10 at refill 1/s, so
   empty→full is 10 s, plus `bucket.grace-seconds: 60`. bob's `feed_paid` is 100 at 20/s → 5 s + 60 =
   **65 000 ms**, and you can see the two different numbers side by side in the two keys. TTL shorter
@@ -255,8 +254,8 @@ refill before it spends, and refill depends on elapsed time since the last refil
 still a wrong number, and it also cannot refuse the spend and *return* the retry time in the same
 operation. That is why stage 2 is a script and not a `HINCRBYFLOAT`.
 
-**7. Memory, and your own a1 estimate, checked.** The design log said "50 b per counter, 5 GB/day for
-100 M users". Load 100 k real buckets and measure:
+**7. Memory, and the back-of-envelope estimate, checked.** A "50 b per counter" figure makes
+100 M users look like 5 GB/day. Load 100 k real buckets and measure:
 
 ```bash
 redis-cli flushall
@@ -275,8 +274,8 @@ Measured on this machine: **~142 bytes per bucket** (the `used_memory` delta for
 dictionary entry and object overhead `MEMORY USAGE` does not attribute to the key — so the cheap way
 to estimate a working set is the delta, not the per-key call.
 
-Which means 100 M *concurrent* buckets ≈ **14 GB**, not 5. Two corrections to the log, both worth
-saying out loud in an interview: it is a **working set**, not "per day" (buckets expire on TTL, so
+Which means 100 M *concurrent* buckets ≈ **14 GB**, not 5. Two corrections to the back-of-envelope
+version of that figure: it is a **working set**, not "per day" (buckets expire on TTL, so
 footprint = active principals × bytes/key, and `noeviction` means that number has to fit), and the
 bytes/key was ~3× optimistic. At 14 GB this does not fit one node with room to breathe, which is the
 sharding argument stage 3 exists for.
@@ -303,7 +302,7 @@ grep -oE '"(HGETALL|HMSET|PEXPIRE)"' /tmp/mon.out | uniq -c | head
 ```
 
 Real result here: **8 × 200, 12 × 429** for a bucket seeded with 1 token, with ~2 s of wall clock
-(≈3 tokens' worth of refill), so roughly **five admissions came out of nothing**. And the log confirms
+(≈3 tokens' worth of refill), so roughly **five admissions came out of nothing**. And `MONITOR` confirms
 the mechanism directly:
 
 ```
@@ -311,8 +310,8 @@ the mechanism directly:
       8 "HMSET"
 ```
 
-Eight requests read the same snapshot and each one subtracted from it independently. That is the exact
-diagram in the review — `A: HGETALL → 1, B: HGETALL → 1, both write 0, both allow` — appearing in a
+Eight requests read the same snapshot and each one subtracted from it independently. That is the
+textbook race diagram — `A: HGETALL → 1, B: HGETALL → 1, both write 0, both allow` — appearing in a
 command log instead of in prose. If you scroll further into `/tmp/mon.out`, two adjacent writes even
 carry the **same value** (`tokens 0.6059999999999999`, same `last_refill_ms`), which is two requests
 that saw the same bucket and both thought they had just spent a token:
@@ -338,7 +337,7 @@ re-earn.
 `roundTripsPerRule: 3` next to `storeLatency` (`p50 1.0 ms`, `p99 25 ms`, `max 234 ms` here). The max
 is the interesting one: a fork, a cold key, or a GC pause in the *limiter* lands on your request path
 because the limiter is now in the request path. Two rules bind most requests, so a request pays
-~6 hops; the a1 target of p99 < 10 ms starts looking ambitious at 1 M req/s, which is the second thing
+~6 hops; a p99 budget of 10 ms starts looking ambitious at 1 M req/s, which is the second thing
 stage 2 fixes.
 
 ---
@@ -506,8 +505,8 @@ some binding two rules), `p50Millis 1.0`, `meanMillis 8.09`, `maxMillis 359`, an
 instrument as much as about Redis: `LatencyRecorder` is a fixed histogram whose buckets top out at
 100 ms, and `percentileMillis()` returns `maxMillis()` when the target falls in the overflow bucket
 (`LatencyRecorder.java:61-69`). So "p99 = 359 ms" means *the p99 is somewhere above 100 ms and the worst
-sample was 359* — the number your own instrumentation invents when the tail escapes its ceiling. The a1
-budget is p99 < 10 ms, so the buckets are placed for that question; a store that gets slower than 100 ms
+sample was 359* — the number your own instrumentation invents when the tail escapes its ceiling. The
+budget this prototype aims at is p99 < 10 ms, so the buckets are placed for that question; a store that gets slower than 100 ms
 is reported as one number, and that is a thing to know before you promise a tail.
 
 Two more readings from the same line:
@@ -681,7 +680,7 @@ load. That is also the working-set estimate from stage 0 divided by the number o
 | Section | Measured here | The line it earns |
 |---|---|---|
 | 1 | 25 requests → 10 × 200, 15 × 429 | burst = capacity, then refill rate |
-| 1 | `429`, `Retry-After: 1`, `RateLimit-Limit/Remaining/Reset/Policy` | the review's "no rejection contract", fixed |
+| 1 | `429`, `Retry-After: 1`, `RateLimit-Limit/Remaining/Reset/Policy` | a rejection contract a client can act on |
 | 2 | 20 split across 2 gateways → 10 | shared state |
 | 3 | 30 concurrent → **30 admitted** (`rmw`) / **10 admitted** (`lua`); the store name is read from `/debug/rl`, so the conclusion matches what ran | the race, and its fix |
 | 4 | alice `tokens=9 ttl=69981`, bob `tokens=99 ttl=64981` | tiers are separate keys; TTL is per-rule |
@@ -739,8 +738,9 @@ a limiter feature.
 
 ## Next stage (not built yet)
 
-- **Stage 4 — local state + sync:** the a1 review's ❌ "single source of truth / eventual consistency"
-  item. Re-run section 2 afterwards: `admitted=10` is what shared state costs, and `admitted≈20` is what
+- **Stage 4 — local state + sync:** the hard part of the design, not yet attempted: keeping a local
+  copy of the bucket means giving up a single source of truth. Re-run section 2 afterwards:
+  `admitted=10` is what shared state costs, and `admitted≈20` is what
   local caching costs — the gap between those two numbers is the drift budget the sync interval has to
   earn back. Stage 2's script is the other half of the argument: a local bucket cannot be made atomic by
   Lua, so the honesty of this stage depends on how much over-admission you are willing to price.
